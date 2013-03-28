@@ -1,0 +1,245 @@
+##################################
+1. package overview
+##################################
+
+edu.indiana.d2i.htrc
+	package contains common classes
+	
+	-Constants.java
+		class that contains names of properties in conf/corpus-analysis.properties
+
+edu.indiana.d2i.htrc.dataapi
+	package contains classes related to dataapi
+	
+	-DataAPIWrapper.java
+		class which retrieves htrc volumes from distributed Cassandra volume store through
+		RESTful web services
+
+edu.indiana.d2i.htrc.exception
+	package defines various exceptions during corpus processing/analysis
+	
+	-DimensionMismatchException.java
+		class which represents dimension mismatch exception when performing operations
+		on two multidimensional arrays 
+		
+edu.indiana.d2i.htrc.corpus
+	package contains utility classes for corpus processing
+
+	-CorpusProcessingUtils.java
+		utility class that contains several utility functions for corpus processing. Following
+		functions need to be implemented:
+		
+		cleanVolume(ArrayWritable volume): function which cleans specified volume of type ArrayWritable
+		getWordSet(ArrayWritable volume): function which extracts interested words (used to form full word set) from specified volume
+		
+edu.indiana.d2i.htrc.corpus.retrieve
+	package which defines a MapReduce job (step-0) that retrieves htrc volumes from Cassandra in parallel
+	
+	-RetrieveRawCorpusMapper.java
+		Mapper class which retrieves a subset of raw volumes using dataapi, no cleaning is performed at this stage.
+	
+	-RetrieveRawCorpusReducer.java
+		Reducer class which writes volumes to Hadoop Distributed File System (HDFS), each reducer
+		generates a SequenceFile which is composed of a list of records, each record is a htrc volume
+		of form (key=volumeID, value=ArrayWritable (list of pages))
+	
+	-RetrieveRawCorpusDriver.java
+		Driver class which launches the MapReduce job. Basically the MapReduce framework launches multiple mappers in 
+		parallel. Each mapper retrieves a subset of raw volumes from Cassandra by using dataapi. In the reduce phase,
+		each reducer spills out a SequenceFile.
+
+edu.indiana.d2i.htrc.corpus.clean
+	package which defines a MapReduce job (step-1) that cleans htrc volumes
+	
+	-CleanCorpusMapper.java
+		Mapper class which cleans a subset of raw volumes, by applying utility function CorpusProcessingUtils.cleanVolume(ArrayWritable volume)
+		to each volume.
+		
+	-CleanCorpusReducer.java
+		Reducer class which writes cleaned volumes to HDFS. Each reducer generates a SequenceFile which is composed of a list of cleaned
+		volumes.
+		
+	-CleanCorpusDriver.java
+		Driver class which launches the MapReduce job. Basically the MapReduce framework launches multiple mappers in 
+		parallel. Each mapper cleans a subset of raw volumes loaded from Sequence files generated in step-0. In the reduce phase,
+		each reducer spills out a SequenceFile containing a subset of cleaned volumes.		
+
+edu.indiana.d2i.htrc.corpus.wordset
+	package which defines a MapReduce job (step-2) that generates full word set from htrc volumes.
+	From our discussion there are TWO word sets, the first level word set (full word set) contains
+	all words we are generally interested and is quite stable. The second level word set (a subset
+	of full word set) is subject to change (for instance, different subsets for different
+	analysis). This MapReduce job is used to generate the full word set.
+	
+	-ComposeWordsetMapper.java
+		Mapper class which extracts interested words from a subset of cleaned volumes, by applying function 
+		CorpusProcessingUtils.getWordSet(ArrayWritable volume) to each volume.
+	
+	-ComposeWordsetReducer.java
+		Reducer class which writes words out.
+		
+	-ComposeWordsetDriver.java
+		Driver class which launches the MapReduce job. The driver specifies the number of reducers to be ONE so
+		all words go to one file. (When there are multiple reducers, we need to do another round of concatenation since
+		each reducer spills out a file). The final output text file which contains full word set looks like: (one word per line)
+		
+		full word set
+		************
+		dog
+		cat
+		elephant
+		... 
+		************
+		
+edu.indiana.d2i.htrc.corpus.transform
+	package which defines a MapReduce job (step-3) that transforms cleaned raw text volumes to indices of words in the full word set.
+	Below is an example:
+	
+	Suppose we have a volume with volumeID "uc1.b3020609", represented as a record in sequence file. Suppose it has two pages
+	, namely its value is a two-element list and each element (page) is a string.
+	
+	<key=uc1.b3020609, value=["Today is a nice day, let us enjoy the sunshine outside", "shall we go fishing outside"]>
+	
+	Suppose we have following full word set (generated from step-2), the first column indicates the line number starting from
+	0, the second column indicates the word
+	
+	full word set
+	**************************
+	0 	nice
+	1 	enjoy
+	2 	sunshine
+	3 	day
+	4 	let
+	5 	outside
+	6 	today
+	7 	fishing
+	8 	go
+	9 	shall
+	10 	we
+	11	us
+	*************************
+	
+	After the transformation, the volume looks like
+	
+	<key=uc1.b3020609, value=["6 0 3 4 11 1 2 5", "9 10 8 7 5"]>
+	
+	Note that since words "is", "a", and "the" don't appear in word set, so we ignore them when performing the transformation. 
+	(punctuation is also removed in this example, but we can use other policies)
+	
+	
+	-CorpusTransformMapper.java
+		Mapper class which transforms a subset of cleaned volumes, by applying CorpusProcessingUtils.transformVolume(ArrayWritable volume,
+		List<String> wordSet) to each volume. File that contains the word set is distributed to each compute node through distributed cache mechanism
+		and the file is loaded before mapper starts.
+		
+	-CorpusTransformReducer.java
+		Reducer class which writes transformed volumes to HDFS. Each reducer generates a SequenceFile which is composed of a list of transformed
+		volumes.
+		
+	-CorpusTransformDriver.java
+		Driver class which launches the MapReduce job. Basically the MapReduce framework launches multiple mappers in 
+		parallel. Each mapper transforms a subset of cleaned raw text volumes loaded from Sequence files generated in step-1. In the reduce phase,
+		each reducer spills out a SequenceFile containing a subset of transformed volumes.	
+
+edu.indiana.d2i.htrc.corpus.analysis
+	package which defines a MapReduce job (step-4) which performs LDA analysis. Suppose we have following full word set table (the stable one) and 
+	subset word set table (not stable, for a particular analysis)
+	
+	full word set (same example as above)
+	**************************
+	0 	nice
+	1 	enjoy
+	2 	sunshine
+	3 	day
+	4 	let
+	5 	outside
+	6 	today
+	7 	fishing
+	8 	go
+	9 	shall
+	10 	we
+	11	us
+	*************************	
+	
+		subset word set
+	**************************
+	0 	nice
+	1 	enjoy
+	2 	day
+	3 	outside
+	4 	fishing
+	5	us
+	*************************
+	
+	firstly we apply utility function CorpusProcessingUtils.generateMappingTable(String fullWordSetFilePath,
+	String subWordSetFilePath, String mappingTableOutPath) to generate mapping table for subset word set, we
+	get
+	
+	   subset word set mapping table
+	*********************************
+	0 	nice		0
+	1 	enjoy		1
+	2 	day			3
+	3 	outside		5
+	4 	fishing		7
+	5	us			11
+	*************************	
+	
+	the third column is (the actual mapping table file only has two columns (2nd and 3rd), here we list line index explicitly as first column)
+	the index (line number in the full word set file, starting from 0) of the word in the full word set.
+	
+	Each mapper deals with a subset of transformed volumes (generated from in step-3) for LDA analysis. For each volume, before starting LDA analysis,
+	mapper transforms it into indices of the words in SUBSET WORD SET, by calling utility function 
+	CorpusProcessingUtils.fullWordSet2SubWordSet(ArrayWritable volume, List<Integer> mappingIndices)
+			
+	below is an example, we use the same volume example as above
+	
+	original volume is: 
+	
+	<key=uc1.b3020609, value=["Today is a nice day, let us enjoy the sunshine outside", "shall we go fishing outside"]>
+	
+	after transformation in step-3 is 
+			
+	<key=uc1.b3020609, value=["6 0 3 4 11 1 2 5", "9 10 8 7 5"]>,
+	
+	after transformation by the mapper, it becomes
+	
+	<key=uc1.b3020609, value=["0 2 5 1 3", "4 3"]>,
+	
+	basically what the mapper does is look up the index in the 3rd column, and convert it to the index in the first column.
+	Note here we omit words that are not in the subset (cannot find a match in the 3rd column).
+	
+	Then mapper applies two functions (need to be implemented) to update words-topics table and topics-documents table
+	
+	LDAAnalyzer.updateWordsTopicsTable(ArrayWritable volume)
+	LDAAnalyzer.updateTopcisDocumentsTable(String documentID, ArrayWritable volume)
+	
+	In the reduce phase, the SINGLE reducer does following two things
+	(1) MERGE words-topics tables from different mappers (the tables are the same size and the logic does simple summation over all tables)
+	(2) CONCATENATE topics-documents tables from different mappers (the tables are of different sizes, since each mapper deals with
+	different number of documents. The logic simply concatenates these tables into a complete table, columns are sorted by
+	document ID)
+	
+	Then the driver calls LDAAnalyzer.isConverged(LDAState ldaState) to check whether the analysis is converged or not. There are
+	two conditions for the loop to exit
+	(1) the analysis is converged
+	(2) maximum number of iterations has been reached
+	
+	-LDAAnalysisMapper.java
+		map class which performs LDA analysis, as described above
+	
+	-LDAAnalysisReducer.java
+		reduce class which performs merge and concatenation as described above
+	
+	-LDAAnalysisDriver.java
+		driver class which launches LDA analysis iteratively, computation terminates until exit condition is met (either converged or maximum number
+		of iterations reached)
+		
+	-LDAAnalyzer.java
+		class encapsulates logic of LDA analysis, pretty rough now, we may need to work together to refine the interfaces exposed by this class
+	
+edu.indiana.d2i.htrc.test
+	package contains test classes
+	
+	-TestSuite.java
+		test class which performs test cases to validate the correctness of the code logic
